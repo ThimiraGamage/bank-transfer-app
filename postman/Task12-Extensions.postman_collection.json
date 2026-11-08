@@ -1,0 +1,1272 @@
+{
+  "info": {
+    "name": "Assignment01 - Task12 final extensions (one percent fee)",
+    "description": "Nimsara, EC/2022/052, BECS32263. Run in listed order ONCE against fresh independent seed data with bank.transfer.fee-rate=0.01. Proves fee conservation, rollback, deposits/withdrawals, strict large-transfer threshold and successful principal/fee aggregates. Final expected total85300, principal sent25001, fees250.01.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8082",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "00 - Initial final-extension seed and safe guard",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "const fresh = accountBalance('100001') === 50000 && accountBalance('100002') === 25000 && accountBalance('100003') === 10000 && accountBalance('999999') === 0 && statValue('Successful transfers') === 0 && statValue('Failed transfers') === 0 && statValue('Customers') === 3;",
+              "pm.test('Fresh seed data guard: stop runner if database is already changed', () => pm.expect(fresh).to.equal(true));",
+              "if (!fresh && pm.execution && pm.execution.setNextRequest) pm.execution.setNextRequest(null);",
+              "balances({'100001':50000, '100002':25000, '100003':10000, '999999':0});",
+              "stats(85000, 0, 0, 3);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/",
+        "description": "Separate fresh final database; fee-rate=0.01."
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    },
+    {
+      "name": "01 - Transfer 5000 and charge 50 fee atomically",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "message('Transfer completed'); balances({'100001':44950,'100002':30000,'100003':10000,'999999':50}); stats(85000,1,0,3);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded"
+          }
+        ],
+        "url": "{{baseUrl}}/transfer",
+        "description": "",
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "fromAccount",
+              "value": "100001",
+              "type": "text"
+            },
+            {
+              "key": "toAccount",
+              "value": "100002",
+              "type": "text"
+            },
+            {
+              "key": "amount",
+              "value": "5000.00",
+              "type": "text"
+            },
+            {
+              "key": "simulateFailure",
+              "value": "false",
+              "type": "text"
+            }
+          ]
+        }
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    },
+    {
+      "name": "02 - Failure after debit preserves all three balances",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "message('All changes were rolled back'); balances({'100001':44950,'100002':30000,'100003':10000,'999999':50}); stats(85000,1,1,3);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded"
+          }
+        ],
+        "url": "{{baseUrl}}/transfer",
+        "description": "",
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "fromAccount",
+              "value": "100001",
+              "type": "text"
+            },
+            {
+              "key": "toAccount",
+              "value": "100003",
+              "type": "text"
+            },
+            {
+              "key": "amount",
+              "value": "1000.00",
+              "type": "text"
+            },
+            {
+              "key": "simulateFailure",
+              "value": "true",
+              "type": "text"
+            }
+          ]
+        }
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    },
+    {
+      "name": "03a - Deposit 500 into Kamal account",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "message('Deposit completed');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded"
+          }
+        ],
+        "url": "{{baseUrl}}/deposit",
+        "description": "",
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "accountNumber",
+              "value": "100001",
+              "type": "text"
+            },
+            {
+              "key": "amount",
+              "value": "500.00",
+              "type": "text"
+            }
+          ]
+        }
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    },
+    {
+      "name": "03b - Deposit committed and excludes transfer statistics",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "balances({'100001':45450,'100002':30000,'100003':10000,'999999':50}); stats(85500,1,1,3); message('Cash deposit completed');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/",
+        "description": ""
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    },
+    {
+      "name": "04a - Withdraw 200 from Kamal account",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "message('Withdrawal completed');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded"
+          }
+        ],
+        "url": "{{baseUrl}}/withdraw",
+        "description": "",
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "accountNumber",
+              "value": "100001",
+              "type": "text"
+            },
+            {
+              "key": "amount",
+              "value": "200.00",
+              "type": "text"
+            }
+          ]
+        }
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    },
+    {
+      "name": "04b - Withdrawal committed and excludes transfer statistics",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "balances({'100001':45250,'100002':30000,'100003':10000,'999999':50}); stats(85300,1,1,3); message('Cash withdrawal completed');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/",
+        "description": ""
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    },
+    {
+      "name": "05 - Transfer above threshold: 10001 plus 100.01 fee",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "message('Transfer completed'); balances({'100001':35148.99,'100002':30000,'100003':20001,'999999':150.01}); stats(85300,2,1,3);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded"
+          }
+        ],
+        "url": "{{baseUrl}}/transfer",
+        "description": "",
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "fromAccount",
+              "value": "100001",
+              "type": "text"
+            },
+            {
+              "key": "toAccount",
+              "value": "100003",
+              "type": "text"
+            },
+            {
+              "key": "amount",
+              "value": "10001.00",
+              "type": "text"
+            },
+            {
+              "key": "simulateFailure",
+              "value": "false",
+              "type": "text"
+            }
+          ]
+        }
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    },
+    {
+      "name": "06 - Transfer exactly threshold: 10000 plus 100 fee",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "message('Transfer completed'); balances({'100001':25048.99,'100002':40000,'100003':20001,'999999':250.01}); stats(85300,3,1,3);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/x-www-form-urlencoded"
+          }
+        ],
+        "url": "{{baseUrl}}/transfer",
+        "description": "",
+        "body": {
+          "mode": "urlencoded",
+          "urlencoded": [
+            {
+              "key": "fromAccount",
+              "value": "100001",
+              "type": "text"
+            },
+            {
+              "key": "toAccount",
+              "value": "100002",
+              "type": "text"
+            },
+            {
+              "key": "amount",
+              "value": "10000.00",
+              "type": "text"
+            },
+            {
+              "key": "simulateFailure",
+              "value": "false",
+              "type": "text"
+            }
+          ]
+        }
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    },
+    {
+      "name": "07 - Large transfers filter is strictly greater than10000",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "const resultRows=records(); pm.test('Exactly one large successful transfer', () => pm.expect(resultRows.length).to.equal(1)); pm.test('10001 principal is included', () => pm.expect(resultRows.some(row => row.includes('10,001.00'))).to.equal(true)); pm.test('Exact10000 transfer is excluded', () => pm.expect(resultRows.some(row => row.includes('10,000.00'))).to.equal(false)); pm.test('Only successful records displayed', () => pm.expect(resultRows.every(row => row.includes('SUCCESS') && !row.includes('FAILED'))).to.equal(true));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/large-transfers?min=10000",
+        "description": ""
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    },
+    {
+      "name": "08 - History sums principal and fees without cash or failure",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "historyAmounts(25001,250.01); pm.test('History includes three transfers, one failure and two cash operations', () => pm.expect(records().length).to.equal(6)); message('Cash deposit completed'); message('Cash withdrawal completed'); message('FAILED');"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/accounts/100001/history",
+        "description": ""
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    },
+    {
+      "name": "09 - Bank account history traces three fee receipts",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "pm.test('Bank history contains three successful fee-bearing transfers', () => pm.expect(records().length).to.equal(3)); pm.test('Bank fee receipt records are successful', () => pm.expect(records().every(row => row.includes('SUCCESS'))).to.equal(true));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/accounts/999999/history",
+        "description": ""
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    },
+    {
+      "name": "10 - Final conserved total and exact balances",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const html = pm.response.text();",
+              "const plain = value => String(value).replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, \"'\").replace(/\\s+/g, ' ').trim();",
+              "const number = value => Number(String(value).replace(/,/g, '').trim());",
+              "const tables = [...html.matchAll(/<table\\b[^>]*>[\\s\\S]*?<\\/table>/gi)].map(m => m[0]);",
+              "function tableRows(table) {",
+              "    return [...(table || '').matchAll(/<tr\\b[^>]*>([\\s\\S]*?)<\\/tr>/gi)]",
+              "        .map(m => [...m[1].matchAll(/<td\\b[^>]*>([\\s\\S]*?)<\\/td>/gi)].map(c => plain(c[1])))",
+              "        .filter(cells => cells.length);",
+              "}",
+              "function customerRows() {",
+              "    return tableRows(tables.find(t => /Account No\\./i.test(plain(t))))",
+              "        .filter(cells => /^\\d{6}$/.test(cells[0]));",
+              "}",
+              "function accountBalance(account) {",
+              "    const row = customerRows().find(cells => cells[0] === account);",
+              "    return row ? number(row[3]) : NaN;",
+              "}",
+              "function statValue(label) {",
+              "    const blocks = [...html.matchAll(/<div\\b[^>]*class=\"[^\"]*\\bstat\\b[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/gi)];",
+              "    const block = blocks.find(m => {",
+              "        const small = m[1].match(/<small\\b[^>]*>([\\s\\S]*?)<\\/small>/i);",
+              "        return small && plain(small[1]).toLowerCase() === label.toLowerCase();",
+              "    });",
+              "    if (!block) return NaN;",
+              "    const span = block[1].match(/<span\\b[^>]*>([\\s\\S]*?)<\\/span>/i);",
+              "    return span ? number(plain(span[1])) : NaN;",
+              "}",
+              "function balances(expected) {",
+              "    Object.entries(expected).forEach(([account, expectedBalance]) => {",
+              "        pm.test('Account ' + account + ' balance = LKR ' + expectedBalance, () => {",
+              "            pm.expect(accountBalance(account), 'rendered customer balance').to.equal(Number(expectedBalance));",
+              "        });",
+              "    });",
+              "}",
+              "function stats(total, successful, failed, customers) {",
+              "    const expected = {'Total balance (LKR)': total, 'Successful transfers': successful, 'Failed transfers': failed};",
+              "    if (customers !== undefined) expected.Customers = customers;",
+              "    Object.entries(expected).forEach(([label, value]) => pm.test(label + ' = ' + value, () => {",
+              "        pm.expect(statValue(label), 'rendered dashboard statistic').to.equal(Number(value));",
+              "    }));",
+              "}",
+              "function message(text) {",
+              "    pm.test('Response contains: ' + text, () => pm.expect(plain(html).toLowerCase()).to.include(text.toLowerCase()));",
+              "}",
+              "function records() {",
+              "    return tableRows(tables.find(t => /Description/i.test(plain(t)) && /Status/i.test(plain(t))))",
+              "        .filter(cells => /^\\d+$/.test(cells[0]));",
+              "}",
+              "function historyAmounts(principal, fees) {",
+              "    const paragraphs = [...html.matchAll(/<p\\b[^>]*>([\\s\\S]*?)<\\/p>/gi)].map(m => plain(m[1]));",
+              "    const principalParagraph = paragraphs.find(p => /^Total sent/i.test(p));",
+              "    const feeParagraph = paragraphs.find(p => /^(?:Total\\s+)?(?:transfer\\s+)?fees/i.test(p));",
+              "    const extract = p => {",
+              "        const match = (p || '').match(/LKR\\s*([\\d,]+\\.\\d{2})/i);",
+              "        return match ? number(match[1]) : NaN;",
+              "    };",
+              "    pm.test('Successful transfer principal sent = ' + principal, () => pm.expect(extract(principalParagraph)).to.equal(principal));",
+              "    pm.test('Successful outgoing transfer fees = ' + fees, () => pm.expect(extract(feeParagraph)).to.equal(fees));",
+              "}",
+              "pm.test('Rendered response is HTTP 200', () => pm.response.to.have.status(200));",
+              "balances({'100001':25048.99,'100002':40000,'100003':20001,'999999':250.01}); stats(85300,3,1,3);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": "{{baseUrl}}/",
+        "description": ""
+      },
+      "response": [],
+      "protocolProfileBehavior": {
+        "followRedirects": true
+      }
+    }
+  ]
+}
